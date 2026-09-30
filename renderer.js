@@ -1,20 +1,26 @@
 "use strict";
 
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
+const { spawn, execFile } = require("child_process");
+const {
+  BackendManager,
+  STATE,
+  DEFAULTS,
+} = require("./package_python");
 
-// Keep a global reference of the mainWindowdow object, if you don't, the mainWindowdow will
-// be closed automatically when the JavaScript object is garbage collected.
+// Keep a global reference of the window object, otherwise the window is
+// closed automatically when the JavaScript object is garbage collected.
 let mainWindow = null;
-let subpy = null;
+let backend = null;
 
-const PY_DIST_FOLDER = "dist-python"; // python distributable folder
-const PY_SRC_FOLDER = "web_app"; // path to the python source
-const PY_MODULE = "run_app.py"; // the name of the main module
+const PY_DIST_FOLDER = "dist-python";
+const PY_SRC_FOLDER = "web_app";
+const PY_MODULE = "run_app.py";
+const BACKEND_PORT = Number(process.env.BACKEND_PORT) || DEFAULTS.port;
 
-const isRunningInBundle = () => {
-  return require("fs").existsSync(path.join(__dirname, PY_DIST_FOLDER));
-};
+const isRunningInBundle = () =>
+  require("fs").existsSync(path.join(__dirname, PY_DIST_FOLDER));
 
 const getPythonScriptPath = () => {
   if (!isRunningInBundle()) {
@@ -30,106 +36,104 @@ const getPythonScriptPath = () => {
   return path.join(__dirname, PY_DIST_FOLDER, PY_MODULE);
 };
 
-const startPythonSubprocess = () => {
-  let script = getPythonScriptPath();
+const startPythonSubprocess = ({ host, port }) => {
+  const script = getPythonScriptPath();
+  const env = Object.assign({}, process.env, {
+    FLASK_HOST: host,
+    FLASK_PORT: String(port),
+  });
   if (isRunningInBundle()) {
-    subpy = require("child_process").execFile(script, []);
-  } else {
-    subpy = require("child_process").spawn("python", [script]);
+    return execFile(script, [], { env });
+  }
+  return spawn("python", [script], { env });
+};
+
+const broadcastState = (snapshot) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("backend:state", snapshot);
   }
 };
 
-const killPythonSubprocesses = (main_pid) => {
-  const python_script_name = path.basename(getPythonScriptPath());
-  let cleanup_completed = false;
-  const psTree = require("ps-tree");
-  psTree(main_pid, function (err, children) {
-    let python_pids = children
-      .filter(function (el) {
-        return el.COMMAND == python_script_name;
-      })
-      .map(function (p) {
-        return p.PID;
-      });
-    // kill all the spawned python processes
-    python_pids.forEach(function (pid) {
-      process.kill(pid);
-    });
-    subpy = null;
-    cleanup_completed = true;
-  });
-  return new Promise(function (resolve, reject) {
-    (function waitForSubProcessCleanup() {
-      if (cleanup_completed) return resolve();
-      setTimeout(waitForSubProcessCleanup, 30);
-    })();
-  });
-};
-
 const createMainWindow = () => {
-  // Create the browser mainWindow
   mainWindow = new BrowserWindow({
     width: 800,
     height: 600,
-    // transparent: true, // transparent header bar
-    icon: __dirname + "/icon.png",
-    // fullscreen: true,
-    // opacity:0.8,
-    // darkTheme: true,
-    // frame: false,
-    resizeable: true,
+    icon: path.join(__dirname, "icon.png"),
+    resizable: true,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
   });
 
-  // Load the index page
-  mainWindow.loadURL("http://localhost:4040/");
+  // Load the local shell. The real Flask baseURL is only loaded into the
+  // embedded frame after the manager has probed it as ready.
+  mainWindow.loadFile(path.join(__dirname, "loading.html"));
 
-  // Open the DevTools.
-  //mainWindow.webContents.openDevTools();
-
-  // Emitted when the mainWindow is closed.
-  mainWindow.on("closed", function () {
-    // Dereference the mainWindow object
+  mainWindow.on("closed", () => {
     mainWindow = null;
   });
 };
 
-// This method will be called when Electron has finished
-// initialization and is ready to create browser windows.
-// Some APIs can only be used after this event occurs.
-app.on("ready", function () {
-  // start the backend server
-  startPythonSubprocess();
-  createMainWindow();
+const initBackend = () => {
+  if (backend) {
+    return backend;
+  }
+  backend = new BackendManager({
+    host: DEFAULTS.host,
+    port: BACKEND_PORT,
+    launchChild: startPythonSubprocess,
+  });
+  backend.on("state", broadcastState);
+  return backend;
+};
+
+ipcMain.handle("backend:get-state", () => {
+  return backend ? backend.snapshot() : null;
 });
 
-// disable menu
-app.on("browser-window-created", function (e, window) {
+ipcMain.on("backend:retry", () => {
+  if (!backend) {
+    initBackend();
+  }
+  if (backend.state === STATE.FAILED) {
+    backend.start();
+  }
+});
+
+app.on("ready", () => {
+  initBackend();
+  createMainWindow();
+  backend.start();
+});
+
+app.on("browser-window-created", (_event, window) => {
   window.setMenu(null);
 });
 
-// Quit when all windows are closed.
 app.on("window-all-closed", () => {
-  // On macOS it is common for applications and their menu bar
-  // to stay active until the user quits explicitly with Cmd + Q
   if (process.platform !== "darwin") {
-    let main_process_pid = process.pid;
-    killPythonSubprocesses(main_process_pid).then(() => {
-      app.quit();
-    });
+    const shutdown = backend
+      ? backend.stop()
+      : Promise.resolve();
+    shutdown.then(() => app.quit());
   }
 });
 
 app.on("activate", () => {
-  // On macOS it's common to re-create a window in the app when the
-  // dock icon is clicked and there are no other windows open.
-  if (subpy == null) {
-    startPythonSubprocess();
-  }
-  if (win === null) {
+  initBackend();
+  if (mainWindow === null) {
     createMainWindow();
+  }
+  if (backend.state !== STATE.READY) {
+    backend.start();
   }
 });
 
-app.on("quit", function () {
-  // do some additional cleanup
+app.on("before-quit", () => {
+  if (backend) {
+    backend.stop();
+  }
 });

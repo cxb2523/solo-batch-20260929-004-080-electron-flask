@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' http://127.0.0.1:4040; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    />
+    <title>ElectronFlask</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        font-family: sans-serif;
+      }
+      #backend-status-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 10px;
+        font-size: 12px;
+        background: #f0f0f0;
+        border-bottom: 1px solid #ccc;
+      }
+      #backend-status-bar[data-state="ready"] {
+        background: #e6f6e6;
+      }
+      #backend-status-bar[data-state="retrying"],
+      #backend-status-bar[data-state="starting"] {
+        background: #fff7e0;
+      }
+      #backend-status-bar[data-state="failed"] {
+        background: #fdecea;
+      }
+      #backend-retry {
+        display: none;
+      }
+      #backend-frame {
+        display: none;
+        width: 100%;
+        height: calc(100% - 27px);
+        border: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="backend-status-bar" data-state="starting">
+      <span id="backend-status-text">后端启动中…</span>
+      <button id="backend-retry" type="button">重试</button>
+    </div>
+    <iframe id="backend-frame" title="Flask 应用"></iframe>
+  </body>
+</html>

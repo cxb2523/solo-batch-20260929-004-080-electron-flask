@@ -24,6 +24,12 @@
 - Windows: `.\node_modules\.bin\electron .`
 - Mac OS/Linux: `./node_modules/.bin/electron .`
 
+**Run the backend lifecycle tests**
+
+- `npm test` (Node's built-in test runner; covers startup failure, mid-run
+  exit/recovery, and occupied-port retry, asserting that renderer requests
+  never hang and that error codes propagate)
+
 **Start app with globally installed electron**
 
 - `electron .`
