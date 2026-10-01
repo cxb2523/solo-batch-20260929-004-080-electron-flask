@@ -4,7 +4,7 @@
   "description": "",
   "main": "renderer.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test \"test/*.test.js\"",
     "start": "electron .",
     "package": "node package_python.js && npm run -s package-electron && npm run -s package-cleanup",
     "package-electron": "electron-builder --publish=never",
@@ -22,6 +22,9 @@
     },
     "files": [
       "renderer.js",
+      "preload.js",
+      "main/**/*",
+      "renderer/**/*",
       "icon.png",
       "node_modules/**/*"
     ],

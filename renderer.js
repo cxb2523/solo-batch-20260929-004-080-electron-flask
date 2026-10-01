@@ -1,16 +1,17 @@
 "use strict";
 
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
+const { FlaskManager } = require("./main/flask_manager");
 
-// Keep a global reference of the mainWindowdow object, if you don't, the mainWindowdow will
+// Keep a global reference of the mainWindow object, if you don't, the mainWindow will
 // be closed automatically when the JavaScript object is garbage collected.
 let mainWindow = null;
-let subpy = null;
 
 const PY_DIST_FOLDER = "dist-python"; // python distributable folder
 const PY_SRC_FOLDER = "web_app"; // path to the python source
 const PY_MODULE = "run_app.py"; // the name of the main module
+const FLASK_BASE_PORT = 4040;
 
 const isRunningInBundle = () => {
   return require("fs").existsSync(path.join(__dirname, PY_DIST_FOLDER));
@@ -30,39 +31,63 @@ const getPythonScriptPath = () => {
   return path.join(__dirname, PY_DIST_FOLDER, PY_MODULE);
 };
 
-const startPythonSubprocess = () => {
-  let script = getPythonScriptPath();
-  if (isRunningInBundle()) {
-    subpy = require("child_process").execFile(script, []);
-  } else {
-    subpy = require("child_process").spawn("python", [script]);
+// Single state machine for the Flask child process. It probes the port
+// before declaring readiness and broadcasts the real baseURL to renderers.
+const flaskManager = new FlaskManager({
+  basePort: FLASK_BASE_PORT,
+  maxRetries: 5,
+  backoffBaseMs: 500,
+  backoffMaxMs: 8000,
+  probePath: "/healthz",
+  spawnForAttempt: (attempt, port) => {
+    const env = { ...process.env, FLASK_PORT: String(port) };
+    if (isRunningInBundle()) {
+      return { command: getPythonScriptPath(), args: [], env };
+    }
+    return { command: "python", args: [getPythonScriptPath()], env };
+  },
+});
+
+const broadcastStatus = (status) => {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send("flask:status", status);
   }
 };
 
-const killPythonSubprocesses = (main_pid) => {
-  const python_script_name = path.basename(getPythonScriptPath());
-  let cleanup_completed = false;
+flaskManager.on("status", (status) => {
+  broadcastStatus(status);
+  if (status.state === "ready" && mainWindow && !mainWindow.isDestroyed()) {
+    const currentURL = mainWindow.webContents.getURL();
+    if (!currentURL.startsWith(status.baseURL)) {
+      mainWindow.loadURL(`${status.baseURL}/`);
+    }
+  }
+});
+
+ipcMain.handle("flask:get-status", () => flaskManager.getStatus());
+ipcMain.handle("flask:restart", () => flaskManager.restart());
+
+// Safety net for stray python descendants (e.g. flask reloader children)
+// that outlive the direct child process.
+const killLeftoverPythonProcesses = () => {
   const psTree = require("ps-tree");
-  psTree(main_pid, function (err, children) {
-    let python_pids = children
-      .filter(function (el) {
-        return el.COMMAND == python_script_name;
-      })
-      .map(function (p) {
-        return p.PID;
-      });
-    // kill all the spawned python processes
-    python_pids.forEach(function (pid) {
-      process.kill(pid);
+  const pythonScriptName = path.basename(getPythonScriptPath());
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, 3000);
+    psTree(process.pid, (err, children) => {
+      clearTimeout(timer);
+      if (err) return resolve();
+      children
+        .filter((el) => el.COMMAND === pythonScriptName)
+        .forEach((p) => {
+          try {
+            process.kill(p.PID);
+          } catch {
+            // already gone
+          }
+        });
+      resolve();
     });
-    subpy = null;
-    cleanup_completed = true;
-  });
-  return new Promise(function (resolve, reject) {
-    (function waitForSubProcessCleanup() {
-      if (cleanup_completed) return resolve();
-      setTimeout(waitForSubProcessCleanup, 30);
-    })();
   });
 };
 
@@ -78,10 +103,21 @@ const createMainWindow = () => {
     // darkTheme: true,
     // frame: false,
     resizeable: true,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      sandbox: false,
+    },
   });
 
-  // Load the index page
-  mainWindow.loadURL("http://localhost:4040/");
+  // Only load the Flask app once the manager has probed a real baseURL;
+  // until then show a local loading page with the status bar.
+  const status = flaskManager.getStatus();
+  if (status.state === "ready" && status.baseURL) {
+    mainWindow.loadURL(`${status.baseURL}/`);
+  } else {
+    mainWindow.loadFile(path.join(__dirname, "renderer", "loading.html"));
+  }
 
   // Open the DevTools.
   //mainWindow.webContents.openDevTools();
@@ -97,9 +133,10 @@ const createMainWindow = () => {
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.on("ready", function () {
-  // start the backend server
-  startPythonSubprocess();
   createMainWindow();
+  flaskManager.start().catch((err) => {
+    console.error("Flask backend failed to start:", err.message);
+  });
 });
 
 // disable menu
@@ -112,22 +149,22 @@ app.on("window-all-closed", () => {
   // On macOS it is common for applications and their menu bar
   // to stay active until the user quits explicitly with Cmd + Q
   if (process.platform !== "darwin") {
-    let main_process_pid = process.pid;
-    killPythonSubprocesses(main_process_pid).then(() => {
-      app.quit();
-    });
+    flaskManager
+      .stop()
+      .then(killLeftoverPythonProcesses)
+      .then(() => {
+        app.quit();
+      });
   }
 });
 
 app.on("activate", () => {
   // On macOS it's common to re-create a window in the app when the
   // dock icon is clicked and there are no other windows open.
-  if (subpy == null) {
-    startPythonSubprocess();
-  }
-  if (win === null) {
+  if (mainWindow === null) {
     createMainWindow();
   }
+  flaskManager.start().catch(() => {});
 });
 
 app.on("quit", function () {

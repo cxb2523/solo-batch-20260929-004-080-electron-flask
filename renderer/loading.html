@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>ElectronFlask</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        margin: 0;
+        color: #444;
+      }
+      main {
+        text-align: center;
+      }
+      button {
+        padding: 6px 16px;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>正在启动 Flask 后端…</h1>
+      <p>后端就绪后页面会自动加载；若启动失败可手动重试。</p>
+      <button onclick="window.flask && window.flask.restart()">重试</button>
+    </main>
+  </body>
+</html>

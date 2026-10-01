@@ -20,6 +20,13 @@
 
 ### Running the App
 
+### Backend lifecycle & IPC
+
+- `main/flask_manager.js` owns the Flask child process as a single state machine (`starting`/`ready`/`retrying`/`failed`). It pre-checks the port, spawns the backend with `FLASK_PORT`, and only broadcasts the real `baseURL` to the renderer after the `/healthz` probe passes. Busy ports are retried on the next port with exponential backoff (capped by `maxRetries`); an unexpected exit re-enters the supervisor loop so the backend recovers automatically.
+- `renderer/flask_client.js` queues requests while the backend is not ready (bounded by timeouts — nothing waits forever), cancels in-flight/queued requests when the backend restarts so stale requests never reach the new process, and rejects with an error code (`FLASK_FAILED`/`FLASK_RESTARTED`/…) once the backend is `failed`.
+- The renderer status bar (`renderer/status_bar.js`, injected by `preload.js`) shows the current state, retry count and last exit code.
+- Run the lifecycle tests with `npm test` (plain Node, no Electron install required).
+
 **Start app**
 - Windows: `.\node_modules\.bin\electron .`
 - Mac OS/Linux: `./node_modules/.bin/electron .`
